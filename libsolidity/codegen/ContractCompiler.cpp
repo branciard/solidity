@@ -652,7 +652,8 @@ bool ContractCompiler::visit(IfStatement const& _ifStatement)
 	}
 	m_context << endTag;
 
-	checker.check();
+	// TODO adjust stack height manually
+	//checker.check();
 	return false;
 }
 
@@ -664,6 +665,7 @@ bool ContractCompiler::visit(WhileStatement const& _whileStatement)
 	eth::AssemblyItem loopEnd = m_context.newTag();
 	m_continueTags.push_back(loopStart);
 	m_breakTags.push_back(loopEnd);
+	m_loops.push(&_whileStatement);
 
 	m_context << loopStart;
 
@@ -685,6 +687,9 @@ bool ContractCompiler::visit(WhileStatement const& _whileStatement)
 		m_context.appendConditionalJumpTo(loopEnd);
 	}
 
+	solAssert(m_loops.top() == &_whileStatement, "");
+	m_loops.pop();
+
 	m_context.appendJumpTo(loopStart);
 	m_context << loopEnd;
 
@@ -704,6 +709,7 @@ bool ContractCompiler::visit(ForStatement const& _forStatement)
 	eth::AssemblyItem loopNext = m_context.newTag();
 	m_continueTags.push_back(loopNext);
 	m_breakTags.push_back(loopEnd);
+	m_loops.push(&_forStatement);
 
 	if (_forStatement.initializationExpression())
 		_forStatement.initializationExpression()->accept(*this);
@@ -726,17 +732,45 @@ bool ContractCompiler::visit(ForStatement const& _forStatement)
 	if (_forStatement.loopExpression())
 		_forStatement.loopExpression()->accept(*this);
 
+	solAssert(m_loops.top() == &_forStatement, "");
+	m_loops.pop();
+
 	m_context.appendJumpTo(loopStart);
+
+	// Block of pops with a tag for each break statement
+	sort(m_breakTagsPops.begin(), m_breakTagsPops.end());
+	auto outter = m_breakTagsPops.rbegin();
+	while (outter != m_breakTagsPops.rend())
+	{
+		auto inner = outter;
+		for (; inner != m_breakTagsPops.rend() && inner->first == outter->first; ++inner)
+			m_context << inner->second;
+		unsigned pops = (inner == m_breakTagsPops.rend()) ? outter->first : (outter->first - inner->first);
+		while (pops--)
+			m_context << Instruction::POP;
+		outter = inner;
+	}
+	m_breakTagsPops.clear();
+
+	// The for initialization variable was also freed by a potential break,
+	// so this should be skipped
+	eth::AssemblyItem afterFreeing = m_context.newTag();
+	m_context.appendJumpTo(afterFreeing);
+
 	m_context << loopEnd;
 
-	// Frees local variables that were declared in the initialization expression,
-	// since their scope is the for statement.
-	popScopedVariables(&_forStatement);
+	// For the case where no break is executed:
+	// loop initialization variables have to be freed
+	popBlockScopedVariables(&_forStatement);
+
+	// Location where the break tags jump to
+	m_context << afterFreeing;
 
 	m_continueTags.pop_back();
 	m_breakTags.pop_back();
 
-	checker.check();
+	// TODO adjust stack height manually
+	//checker.check();
 	return false;
 }
 
@@ -751,8 +785,13 @@ bool ContractCompiler::visit(Continue const& _continueStatement)
 bool ContractCompiler::visit(Break const& _breakStatement)
 {
 	CompilerContext::LocationSetter locationSetter(m_context, _breakStatement);
+	solAssert(!m_loops.empty(), "");
+	m_breakTagsPops.push_back(std::make_pair<unsigned, eth::AssemblyItem>(
+		m_loopScopedVariables[m_loops.top()].size(),
+		m_context.newTag()
+	));
 	if (!m_breakTags.empty())
-		m_context.appendJumpTo(m_breakTags.back());
+		m_context.appendJumpTo(m_breakTagsPops.back().second);
 	return false;
 }
 
@@ -864,7 +903,7 @@ bool ContractCompiler::visit(PlaceholderStatement const& _placeholderStatement)
 void ContractCompiler::endVisit(Block const& _block)
 {
 	// Frees local variables declared in the scope of this block.
-	popScopedVariables(&_block);
+	popBlockScopedVariables(&_block);
 }
 
 void ContractCompiler::appendMissingFunctions()
@@ -993,16 +1032,28 @@ eth::AssemblyPointer ContractCompiler::cloneRuntime() const
 void ContractCompiler::addScopedVariable(VariableDeclaration const& _decl)
 {
 	// TODO check > 17
-	m_scopeVariables[_decl.scope()].emplace_back(&_decl);
+	m_scopedVariables[_decl.scope()].push_back(&_decl);
+	if (!m_loops.empty())
+		m_loopScopedVariables[m_loops.top()].push_back(&_decl);
 	appendStackVariableInitialisation(_decl);
 }
 
-void ContractCompiler::popScopedVariables(ASTNode const* _node)
+void ContractCompiler::popBlockScopedVariables(ASTNode const* _node)
 {
-	for (auto _decl : m_scopeVariables[_node])
+	for (auto _decl : m_scopedVariables[_node])
 	{
+		CompilerContext::LocationSetter locationSetter(m_context, *_decl);
 		m_context << Instruction::POP;
 		m_context.removeVariable(*_decl);
 	}
-	m_scopeVariables.erase(_node);
+	m_scopedVariables.erase(_node);
+}
+
+void ContractCompiler::popLoopScopedVariables(ASTNode const* _node)
+{
+	for (auto _decl : m_loopScopedVariables[_node])
+	{
+		CompilerContext::LocationSetter locationSetter(m_context, *_decl);
+		m_context << Instruction::POP;
+	}
 }

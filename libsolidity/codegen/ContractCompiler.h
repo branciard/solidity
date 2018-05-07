@@ -128,7 +128,8 @@ private:
 	void addScopedVariable(VariableDeclaration const& _decl);
 
 	/// Frees the variables of a certain scope (to be used when leaving).
-	void popScopedVariables(ASTNode const* _node);
+	void popBlockScopedVariables(ASTNode const* _node);
+	void popLoopScopedVariables(ASTNode const* _node);
 
 	bool const m_optimise;
 	/// Pointer to the runtime compiler in case this is a creation compiler.
@@ -145,7 +146,10 @@ private:
 	std::map<FunctionDefinition const*, ASTNode const*> const* m_baseArguments;
 
 	/// Stores the variables that were declared inside a specific scope.
-	std::map<ASTNode const*, std::vector<VariableDeclaration const*>> m_scopeVariables;
+	std::map<ASTNode const*, std::vector<VariableDeclaration const*>> m_scopedVariables;
+	std::map<ASTNode const*, std::vector<VariableDeclaration const*>> m_loopScopedVariables;
+	std::stack<BreakableStatement const*> m_loops;
+	std::vector<std::pair<unsigned, eth::AssemblyItem>> m_breakTagsPops;
 };
 
 }
